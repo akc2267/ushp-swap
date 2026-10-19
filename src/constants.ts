@@ -1,10 +1,6 @@
-// ---------------------------------------------------------------------------
-// Uniswap v4 — Ethereum mainnet (chain id 1)
-// Addresses verified from https://developers.uniswap.org/contracts/v4/deployments
-// ---------------------------------------------------------------------------
+import { mainnet, sepolia } from 'wagmi/chains'
 
-export const UNIVERSAL_ROUTER = '0x66a9893cc07d91d95644aedd05d03f95e1dba8af' as const
-export const V4_QUOTER = '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203' as const
+// Permit2 is deployed at the same address on every chain.
 export const PERMIT2 = '0x000000000022D473030F116dDEE9F6B43aC78BA3' as const
 
 export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
@@ -33,8 +29,8 @@ export const ETH: TokenInfo = {
   isNative: true,
 }
 
-// Real, verified-tradable tokens (each has a live ETH v4 pool with liquidity).
-export const TOKENS: TokenInfo[] = [
+// Real, verified-tradable mainnet tokens (each has a live ETH v4 pool with liquidity).
+export const MAINNET_TOKENS: TokenInfo[] = [
   { symbol: 'USDC', name: 'USD Coin', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6, isNative: false, poolFee: 500, poolTickSpacing: 10 },
   { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, isNative: false, poolFee: 500, poolTickSpacing: 10 },
   { symbol: 'WBTC', name: 'Wrapped Bitcoin', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', decimals: 8, isNative: false, poolFee: 500, poolTickSpacing: 10 },
@@ -47,7 +43,60 @@ export const TOKENS: TokenInfo[] = [
   { symbol: 'PEPE', name: 'Pepe', address: '0x6982508145454Ce325dDbE47a25d4ec3d2311933', decimals: 18, isNative: false, poolFee: 10000, poolTickSpacing: 200 },
 ]
 
-export const USDC = TOKENS[0]
+// Sepolia tokens with a liquid, hookless ETH v4 pool. Discovered on-chain via
+// scripts/probe-sepolia.mjs — testnet pools come and go, so re-run it if
+// quotes start failing.
+const SEPOLIA_TOKENS: TokenInfo[] = [
+  // Circle's official Sepolia USDC
+  { symbol: 'USDC', name: 'USD Coin', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', decimals: 6, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
+  { symbol: 'UNI', name: 'Uniswap', address: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984', decimals: 18, isNative: false, poolFee: 100, poolTickSpacing: 1 },
+  // Chainlink's faucet LINK
+  { symbol: 'LINK', name: 'Chainlink', address: '0x779877A7B0D9E8603169DdbD7836e478b4624789', decimals: 18, isNative: false, poolFee: 10000, poolTickSpacing: 200 },
+]
+
+// ---------------------------------------------------------------------------
+// Per-chain Uniswap v4 deployments.
+// Addresses from https://docs.uniswap.org/contracts/v4/deployments, each
+// checked to have code on-chain.
+// ---------------------------------------------------------------------------
+
+export type ChainConfig = {
+  chain: typeof mainnet | typeof sepolia
+  name: string
+  testnet: boolean
+  universalRouter: `0x${string}`
+  v4Quoter: `0x${string}`
+  explorer: string
+  tokens: TokenInfo[]
+}
+
+export const CHAIN_CONFIG = {
+  [mainnet.id]: {
+    chain: mainnet,
+    name: 'Ethereum',
+    testnet: false,
+    universalRouter: '0x66a9893cc07d91d95644aedd05d03f95e1dba8af',
+    v4Quoter: '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203',
+    explorer: 'https://etherscan.io',
+    tokens: MAINNET_TOKENS,
+  },
+  [sepolia.id]: {
+    chain: sepolia,
+    name: 'Sepolia',
+    testnet: true,
+    universalRouter: '0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b',
+    v4Quoter: '0x61B3f2011A92d183C7dbaDBdA940a7555Ccf9227',
+    explorer: 'https://sepolia.etherscan.io',
+    tokens: SEPOLIA_TOKENS,
+  },
+} as const satisfies Record<number, ChainConfig>
+
+export type SupportedChainId = keyof typeof CHAIN_CONFIG
+export const SUPPORTED_CHAIN_IDS = [mainnet.id, sepolia.id] as const
+
+export function isSupportedChain(id: number | undefined): id is SupportedChainId {
+  return id !== undefined && id in CHAIN_CONFIG
+}
 
 /** Build the v4 PoolKey for a token's ETH pool. ETH (address 0) is currency0. */
 export function poolKeyFor(token: TokenInfo) {

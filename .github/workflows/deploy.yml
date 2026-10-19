@@ -1,0 +1,58 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - run: npm ci
+
+      # Pages is static hosting, so server-only API routes can't be deployed
+      # (and the Privy app secret is never needed in this build).
+      - name: Drop server-only API routes
+        run: rm -rf src/app/api
+
+      - name: Build static export
+        run: npx next build
+        env:
+          GITHUB_PAGES: 'true'
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          # Public client-side ID (it ships in the browser bundle either way).
+          NEXT_PUBLIC_PRIVY_APP_ID: cmvfdasxg000r0fl8qm42hppb
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

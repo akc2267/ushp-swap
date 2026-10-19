@@ -1,8 +1,8 @@
 // Minimal inline SVG icons so the app stays fully self-contained.
 
-export function EthIcon({ size = 24 }: { size?: number }) {
+export function EthIcon({ size = 24, testnet = false }: { size?: number; testnet?: boolean }) {
   return (
-    <span className="token-icon" style={{ width: size, height: size, background: '#627EEA' }}>
+    <span className="token-icon" style={{ width: size, height: size, background: testnet ? '#6b7385' : '#627EEA' }}>
       <svg viewBox="0 0 24 24" width={size * 0.62} height={size * 0.62} fill="none">
         <path d="M12 2.5L11.85 3v11.1l.15.15 5.1-3.02L12 2.5z" fill="#fff" opacity="0.6" />
         <path d="M12 2.5L6.9 11.23 12 14.25V2.5z" fill="#fff" />
@@ -84,6 +84,27 @@ export function Triangle({ up }: { up: boolean }) {
   return (
     <svg width="11" height="11" viewBox="0 0 12 12" style={{ transform: up ? 'none' : 'rotate(180deg)' }}>
       <path d="M6 2l4.5 8h-9z" fill="currentColor" />
+    </svg>
+  )
+}
+
+// The USHP bar mark from ushpindex.com (7 bars, 40×37 at 1×).
+const USHP_BARS = [
+  { x: 0, y: 0, h: 28 },
+  { x: 6, y: 0, h: 33 },
+  { x: 12, y: 0, h: 36 },
+  { x: 18, y: 18, h: 19 },
+  { x: 24, y: 0, h: 36 },
+  { x: 30, y: 0, h: 33 },
+  { x: 36, y: 0, h: 28 },
+]
+
+export function UshpMark({ height = 37 }: { height?: number }) {
+  return (
+    <svg className="ushp-mark" height={height} width={(height * 40) / 37} viewBox="0 0 40 37" aria-hidden>
+      {USHP_BARS.map((b) => (
+        <rect key={b.x} x={b.x} y={b.y} width={4} height={b.h} fill="currentColor" />
+      ))}
     </svg>
   )
 }
