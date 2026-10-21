@@ -13,14 +13,18 @@ export type TokenInfo = {
   address: `0x${string}`
   decimals: number
   isNative: boolean
-  // Pool params for this token's v4 pool paired with native ETH.
-  // Discovered on-chain via scripts/probe-pools.mjs. Undefined for ETH itself.
-  poolFee?: number
-  poolTickSpacing?: number
 }
 
-// Native ETH is the common base currency — every tradable token below has a
-// live v4 pool paired with ETH. ETH is address(0), so it is always currency0.
+/** A hookless Uniswap v4 pool between two currencies (order doesn't matter). */
+export type PoolDef = {
+  a: `0x${string}`
+  b: `0x${string}`
+  fee: number
+  tickSpacing: number
+}
+
+// Native ETH is never bought or sold directly — it only appears as an
+// intermediate hop inside a single swap (e.g. USDC -> ETH -> LINK).
 export const ETH: TokenInfo = {
   symbol: 'ETH',
   name: 'Ethereum',
@@ -29,30 +33,22 @@ export const ETH: TokenInfo = {
   isNative: true,
 }
 
-// Real, verified-tradable mainnet tokens (each has a live ETH v4 pool with liquidity).
-export const MAINNET_TOKENS: TokenInfo[] = [
-  { symbol: 'USDC', name: 'USD Coin', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6, isNative: false, poolFee: 500, poolTickSpacing: 10 },
-  { symbol: 'USDT', name: 'Tether USD', address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, isNative: false, poolFee: 500, poolTickSpacing: 10 },
-  { symbol: 'WBTC', name: 'Wrapped Bitcoin', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', decimals: 8, isNative: false, poolFee: 500, poolTickSpacing: 10 },
-  { symbol: 'DAI', name: 'Dai Stablecoin', address: '0x6B175474E89094C44Da98b954EedeAC495271d0F', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'UNI', name: 'Uniswap', address: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'LINK', name: 'Chainlink', address: '0x514910771AF9Ca656af840dff83E8264EcF986CA', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'AAVE', name: 'Aave', address: '0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'LDO', name: 'Lido DAO', address: '0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'ENS', name: 'Ethereum Name Service', address: '0xC18360217D8F7Ab5e7c516566761Ea12Ce7F9D72', decimals: 18, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'PEPE', name: 'Pepe', address: '0x6982508145454Ce325dDbE47a25d4ec3d2311933', decimals: 18, isNative: false, poolFee: 10000, poolTickSpacing: 200 },
-]
+const tok = (symbol: string, name: string, address: `0x${string}`, decimals: number): TokenInfo => ({
+  symbol,
+  name,
+  address,
+  decimals,
+  isNative: false,
+})
 
-// Sepolia tokens with a liquid, hookless ETH v4 pool. Discovered on-chain via
-// scripts/probe-sepolia.mjs — testnet pools come and go, so re-run it if
-// quotes start failing.
-const SEPOLIA_TOKENS: TokenInfo[] = [
-  // Circle's official Sepolia USDC
-  { symbol: 'USDC', name: 'USD Coin', address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', decimals: 6, isNative: false, poolFee: 3000, poolTickSpacing: 60 },
-  { symbol: 'UNI', name: 'Uniswap', address: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984', decimals: 18, isNative: false, poolFee: 100, poolTickSpacing: 1 },
-  // Chainlink's faucet LINK
-  { symbol: 'LINK', name: 'Chainlink', address: '0x779877A7B0D9E8603169DdbD7836e478b4624789', decimals: 18, isNative: false, poolFee: 10000, poolTickSpacing: 200 },
-]
+// Every swap is USDC <-> LINK. Pools discovered on-chain and ranked by
+// liquidity with scripts/probe-pair-pools.mjs; the app quotes each route
+// (direct, or through ETH) and takes the best. Testnet pools come and go and
+// their prices are arbitrary — re-run the probe if Sepolia quotes fail.
+const MAINNET_USDC = tok('USDC', 'USD Coin', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', 6)
+const MAINNET_LINK = tok('LINK', 'Chainlink', '0x514910771AF9Ca656af840dff83E8264EcF986CA', 18)
+const SEPOLIA_USDC = tok('USDC', 'USD Coin', '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', 6) // Circle's official Sepolia USDC
+const SEPOLIA_LINK = tok('LINK', 'Chainlink', '0x779877A7B0D9E8603169DdbD7836e478b4624789', 18) // Chainlink faucet LINK
 
 // ---------------------------------------------------------------------------
 // Per-chain Uniswap v4 deployments.
@@ -67,7 +63,11 @@ export type ChainConfig = {
   universalRouter: `0x${string}`
   v4Quoter: `0x${string}`
   explorer: string
+  /** The token every swap is paired against (USDC). */
+  base: TokenInfo
+  /** Tokens the user can pick, in display order (the first is the default). */
   tokens: TokenInfo[]
+  pools: PoolDef[]
 }
 
 export const CHAIN_CONFIG = {
@@ -78,7 +78,13 @@ export const CHAIN_CONFIG = {
     universalRouter: '0x66a9893cc07d91d95644aedd05d03f95e1dba8af',
     v4Quoter: '0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203',
     explorer: 'https://etherscan.io',
-    tokens: MAINNET_TOKENS,
+    base: MAINNET_USDC,
+    tokens: [MAINNET_LINK],
+    pools: [
+      { a: MAINNET_USDC.address, b: MAINNET_LINK.address, fee: 3000, tickSpacing: 60 },
+      { a: ZERO_ADDRESS, b: MAINNET_USDC.address, fee: 500, tickSpacing: 10 },
+      { a: ZERO_ADDRESS, b: MAINNET_LINK.address, fee: 3000, tickSpacing: 60 },
+    ],
   },
   [sepolia.id]: {
     chain: sepolia,
@@ -87,7 +93,13 @@ export const CHAIN_CONFIG = {
     universalRouter: '0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b',
     v4Quoter: '0x61B3f2011A92d183C7dbaDBdA940a7555Ccf9227',
     explorer: 'https://sepolia.etherscan.io',
-    tokens: SEPOLIA_TOKENS,
+    base: SEPOLIA_USDC,
+    tokens: [SEPOLIA_LINK],
+    pools: [
+      { a: SEPOLIA_USDC.address, b: SEPOLIA_LINK.address, fee: 9000, tickSpacing: 90 },
+      { a: ZERO_ADDRESS, b: SEPOLIA_USDC.address, fee: 3000, tickSpacing: 60 },
+      { a: ZERO_ADDRESS, b: SEPOLIA_LINK.address, fee: 10000, tickSpacing: 200 },
+    ],
   },
 } as const satisfies Record<number, ChainConfig>
 
@@ -98,48 +110,32 @@ export function isSupportedChain(id: number | undefined): id is SupportedChainId
   return id !== undefined && id in CHAIN_CONFIG
 }
 
-/** Build the v4 PoolKey for a token's ETH pool. ETH (address 0) is currency0. */
-export function poolKeyFor(token: TokenInfo) {
-  if (token.poolFee === undefined || token.poolTickSpacing === undefined) {
-    throw new Error(`No pool configured for ${token.symbol}`)
-  }
-  return {
-    currency0: ETH.address,
-    currency1: token.address,
-    fee: token.poolFee,
-    tickSpacing: token.poolTickSpacing,
-    hooks: HOOKS,
-  } as const
-}
-
 // --- ABIs ---------------------------------------------------------------
 
-// V4Quoter.quoteExactInputSingle. Marked `view` so viem's readContract accepts
-// it; on-chain it is a (revert-and-return) simulation that eth_call resolves.
+// V4Quoter.quoteExactInput (multi-hop; a one-hop path is a direct pool).
+// Marked `view` so viem's readContract accepts it; on-chain it is a
+// (revert-and-return) simulation that eth_call resolves.
+const PATH_KEY_COMPONENTS = [
+  { name: 'intermediateCurrency', type: 'address' },
+  { name: 'fee', type: 'uint24' },
+  { name: 'tickSpacing', type: 'int24' },
+  { name: 'hooks', type: 'address' },
+  { name: 'hookData', type: 'bytes' },
+] as const
+
 export const QUOTER_ABI = [
   {
     type: 'function',
-    name: 'quoteExactInputSingle',
+    name: 'quoteExactInput',
     stateMutability: 'view',
     inputs: [
       {
         name: 'params',
         type: 'tuple',
         components: [
-          {
-            name: 'poolKey',
-            type: 'tuple',
-            components: [
-              { name: 'currency0', type: 'address' },
-              { name: 'currency1', type: 'address' },
-              { name: 'fee', type: 'uint24' },
-              { name: 'tickSpacing', type: 'int24' },
-              { name: 'hooks', type: 'address' },
-            ],
-          },
-          { name: 'zeroForOne', type: 'bool' },
+          { name: 'exactCurrency', type: 'address' },
+          { name: 'path', type: 'tuple[]', components: PATH_KEY_COMPONENTS },
           { name: 'exactAmount', type: 'uint128' },
-          { name: 'hookData', type: 'bytes' },
         ],
       },
     ],

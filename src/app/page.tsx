@@ -16,7 +16,7 @@ export default function Home() {
       <main className="stage">
         <div className="hero">
           <h1>Swap</h1>
-          <p>Trade on Uniswap v4 · Ethereum &amp; Sepolia</p>
+          <p>USDC ↔ LINK on Uniswap v4 · Ethereum &amp; Sepolia</p>
         </div>
         <SwapWidget />
       </main>

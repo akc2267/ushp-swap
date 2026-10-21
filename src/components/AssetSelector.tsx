@@ -1,16 +1,18 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { ETH, type TokenInfo } from '../constants'
+import type { TokenInfo } from '../constants'
 import { formatUsd, useUsdPrices } from '../hooks/useUsdPrices'
 import { CloseIcon, SearchIcon, TokenIcon, TrendingIcon } from './icons'
 
 export function AssetSelector({
+  base,
   tokens,
   selected,
   onSelect,
   onClose,
 }: {
+  base: TokenInfo
   tokens: TokenInfo[]
   selected: TokenInfo
   onSelect: (token: TokenInfo) => void
@@ -28,10 +30,10 @@ export function AssetSelector({
     )
   }, [query, tokens])
 
-  const ethMatches = useMemo(() => {
+  const baseMatches = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return !q || ETH.symbol.toLowerCase().includes(q) || ETH.name.toLowerCase().includes(q)
-  }, [query])
+    return !q || base.symbol.toLowerCase().includes(q) || base.name.toLowerCase().includes(q)
+  }, [query, base])
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -59,17 +61,17 @@ export function AssetSelector({
             <span>Trending</span>
           </div>
 
-          {ethMatches && (
+          {baseMatches && (
             <div className="asset-row asset-row--base" title="Base currency — always one side of the pair">
               <div className="asset-row-left">
-                <TokenIcon symbol={ETH.symbol} size={40} />
+                <TokenIcon symbol={base.symbol} size={40} />
                 <div className="asset-names">
-                  <span className="asset-ticker">{ETH.symbol}</span>
-                  <span className="asset-name">{ETH.name}</span>
+                  <span className="asset-ticker">{base.symbol}</span>
+                  <span className="asset-name">{base.name}</span>
                 </div>
               </div>
               <div className="asset-row-right">
-                {prices[ETH.symbol] ? <span className="asset-price">{formatUsd(prices[ETH.symbol])}</span> : null}
+                {prices[base.symbol] ? <span className="asset-price">{formatUsd(prices[base.symbol])}</span> : null}
                 <span className="asset-base-tag">Base</span>
               </div>
             </div>
@@ -102,7 +104,7 @@ export function AssetSelector({
             )
           })}
 
-          {filtered.length === 0 && !ethMatches && (
+          {filtered.length === 0 && !baseMatches && (
             <div className="empty-state">No assets match “{query}”.</div>
           )}
         </div>

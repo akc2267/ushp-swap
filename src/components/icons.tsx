@@ -30,6 +30,7 @@ export function UsdcIcon({ size = 24 }: { size?: number }) {
 export function TokenIcon({ symbol, size = 24 }: { symbol: string; size?: number }) {
   if (symbol === 'ETH') return <EthIcon size={size} />
   if (symbol === 'USDC') return <UsdcIcon size={size} />
+  if (symbol === 'LINK') return <LinkIcon size={size} />
   // Fallback: monogram chip for decorative / preview tokens.
   return (
     <span className="token-icon token-icon--mono" style={{ width: size, height: size }}>
@@ -106,5 +107,24 @@ export function UshpMark({ height = 37 }: { height?: number }) {
         <rect key={b.x} x={b.x} y={b.y} width={4} height={b.h} fill="currentColor" />
       ))}
     </svg>
+  )
+}
+
+export function CheckIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+// Chainlink's hexagon mark, simplified.
+export function LinkIcon({ size = 24 }: { size?: number }) {
+  return (
+    <span className="token-icon" style={{ width: size, height: size, background: '#2A5ADA' }}>
+      <svg viewBox="0 0 24 24" width={size * 0.62} height={size * 0.62} fill="none">
+        <path d="M12 3.5l7.4 4.25v8.5L12 20.5l-7.4-4.25v-8.5L12 3.5z" stroke="#fff" strokeWidth="2.4" strokeLinejoin="round" />
+      </svg>
+    </span>
   )
 }

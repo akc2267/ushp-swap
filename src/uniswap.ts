@@ -1,41 +1,75 @@
 import { V4Planner, Actions } from '@uniswap/v4-sdk'
 import { CommandType } from '@uniswap/universal-router-sdk'
 import { encodeAbiParameters, toHex, type Hex, type PublicClient } from 'viem'
-import {
-  HOOK_DATA,
-  PERMIT2,
-  poolKeyFor,
-  QUOTER_ABI,
-  ZERO_ADDRESS,
-  type TokenInfo,
-} from './constants'
+import { HOOK_DATA, HOOKS, PERMIT2, QUOTER_ABI, type PoolDef, type TokenInfo } from './constants'
+
+// ---------------------------------------------------------------------------
+// Routing
+//
+// Each chain lists a handful of known pools (a small graph of currencies).
+// A route is a v4 path from tokenIn to tokenOut through up to MAX_HOPS pools;
+// every route is quoted and the best output wins. A one-hop path is simply a
+// direct pool, so direct and multi-hop swaps share the same code.
+// ---------------------------------------------------------------------------
+
+const MAX_HOPS = 2
+
+export type PathKey = {
+  intermediateCurrency: `0x${string}`
+  fee: number
+  tickSpacing: number
+  hooks: `0x${string}`
+  hookData: Hex
+}
+
+export type Quote = { amountOut: bigint; path: PathKey[] }
+
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+
+/** All simple paths from `from` to `to` through the pool graph (≤ MAX_HOPS). */
+export function findPaths(pools: PoolDef[], from: `0x${string}`, to: `0x${string}`): PathKey[][] {
+  const paths: PathKey[][] = []
+  const walk = (current: `0x${string}`, path: PathKey[], visited: string[]) => {
+    for (const pool of pools) {
+      const next = same(pool.a, current) ? pool.b : same(pool.b, current) ? pool.a : null
+      if (!next || visited.some((v) => same(v, next))) continue
+      const hop: PathKey = { intermediateCurrency: next, fee: pool.fee, tickSpacing: pool.tickSpacing, hooks: HOOKS, hookData: HOOK_DATA }
+      if (same(next, to)) paths.push([...path, hop])
+      else if (path.length + 1 < MAX_HOPS) walk(next, [...path, hop], [...visited, next])
+    }
+  }
+  walk(from, [], [from])
+  return paths
+}
 
 /**
- * Get an exact-input quote from a chain's V4Quoter for a token's ETH pool.
- * `zeroForOne === true` means swapping currency0 (ETH) -> currency1 (token).
- * Returns the expected output amount in the output token's smallest units.
+ * Quote every route between two tokens with the chain's V4Quoter and return
+ * the one with the best output. Throws if no route can be quoted.
  */
-export async function getQuote(
+export async function getBestQuote(
   publicClient: PublicClient,
   quoter: `0x${string}`,
-  token: TokenInfo,
+  pools: PoolDef[],
+  tokenIn: TokenInfo,
+  tokenOut: TokenInfo,
   amountIn: bigint,
-  zeroForOne: boolean,
-): Promise<bigint> {
-  const [amountOut] = await publicClient.readContract({
-    address: quoter,
-    abi: QUOTER_ABI,
-    functionName: 'quoteExactInputSingle',
-    args: [
-      {
-        poolKey: poolKeyFor(token),
-        zeroForOne,
-        exactAmount: amountIn,
-        hookData: HOOK_DATA,
-      },
-    ],
-  })
-  return amountOut
+): Promise<Quote> {
+  const quotes = await Promise.all(
+    findPaths(pools, tokenIn.address, tokenOut.address).map((path) =>
+      publicClient
+        .readContract({
+          address: quoter,
+          abi: QUOTER_ABI,
+          functionName: 'quoteExactInput',
+          args: [{ exactCurrency: tokenIn.address, path, exactAmount: amountIn }],
+        })
+        .then(([amountOut]) => ({ amountOut, path }))
+        .catch(() => null),
+    ),
+  )
+  const best = quotes.reduce<Quote | null>((b, q) => (q && (!b || q.amountOut > b.amountOut) ? q : b), null)
+  if (!best || best.amountOut === 0n) throw new Error(`No route for ${tokenIn.symbol} → ${tokenOut.symbol}`)
+  return best
 }
 
 // ---------------------------------------------------------------------------
@@ -107,42 +141,36 @@ export type SwapCalldata = {
 }
 
 /**
- * Build the Universal Router `execute` calldata for a single-hop v4 swap
- * between native ETH and `token`. Pass `permit` to have the router apply a
- * signed Permit2 allowance before swapping (ERC20 input only).
+ * Build the Universal Router `execute` calldata for an exact-input v4 swap
+ * along `path` (from getBestQuote). Pass `permit` to have the router apply a
+ * signed Permit2 allowance first.
  *
  * NOTE: in the installed SDK versions `RoutePlanner.inputs` does NOT correctly
  * ABI-encode the V4_SWAP payload — it must be `v4Planner.finalize()`, which is
  * the proper abi.encode(bytes actions, bytes[] params). We verified this
  * empirically before sending real funds.
  */
-export function buildV4SwapCalldata(
-  token: TokenInfo,
-  params: {
-    zeroForOne: boolean
-    amountIn: bigint
-    amountOutMinimum: bigint
-    permit?: SignedPermit
-  },
-): SwapCalldata {
-  const { zeroForOne, amountIn, amountOutMinimum, permit } = params
-  const poolKey = poolKeyFor(token)
-
-  const inputCurrency = zeroForOne ? poolKey.currency0 : poolKey.currency1
-  const outputCurrency = zeroForOne ? poolKey.currency1 : poolKey.currency0
-
-  const config = {
-    poolKey,
-    zeroForOne,
-    amountIn: amountIn.toString(),
-    amountOutMinimum: amountOutMinimum.toString(),
-    hookData: HOOK_DATA,
-  }
+export function buildV4SwapCalldata(params: {
+  tokenIn: TokenInfo
+  tokenOut: TokenInfo
+  path: PathKey[]
+  amountIn: bigint
+  amountOutMinimum: bigint
+  permit?: SignedPermit
+}): SwapCalldata {
+  const { tokenIn, tokenOut, path, amountIn, amountOutMinimum, permit } = params
 
   const v4Planner = new V4Planner()
-  v4Planner.addAction(Actions.SWAP_EXACT_IN_SINGLE, [config])
-  v4Planner.addAction(Actions.SETTLE_ALL, [inputCurrency, amountIn.toString()])
-  v4Planner.addAction(Actions.TAKE_ALL, [outputCurrency, amountOutMinimum.toString()])
+  v4Planner.addAction(Actions.SWAP_EXACT_IN, [
+    {
+      currencyIn: tokenIn.address,
+      path,
+      amountIn: amountIn.toString(),
+      amountOutMinimum: amountOutMinimum.toString(),
+    },
+  ])
+  v4Planner.addAction(Actions.SETTLE_ALL, [tokenIn.address, amountIn.toString()])
+  v4Planner.addAction(Actions.TAKE_ALL, [tokenOut.address, amountOutMinimum.toString()])
 
   const commands: number[] = []
   const inputs: Hex[] = []
@@ -153,8 +181,8 @@ export function buildV4SwapCalldata(
   commands.push(CommandType.V4_SWAP)
   inputs.push(v4Planner.finalize() as Hex)
 
-  // Native ETH input is paid via msg.value; ERC20 input is pulled via Permit2.
-  const value = inputCurrency === ZERO_ADDRESS ? amountIn : 0n
+  // Native ETH input would be paid via msg.value; ERC20 input is pulled via Permit2.
+  const value = tokenIn.isNative ? amountIn : 0n
 
   return { commands: toHex(new Uint8Array(commands)), inputs, value }
 }

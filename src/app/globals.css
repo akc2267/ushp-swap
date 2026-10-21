@@ -708,3 +708,130 @@ button.pill--primary:hover:not(:disabled) {
     padding: 16px;
   }
 }
+
+/* ---------------- swap progress ---------------- */
+.swap-progress {
+  margin-top: 14px;
+  padding: 14px 18px 16px;
+  border-radius: 22px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+}
+.swap-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.swap-progress-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.swap-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(126, 203, 161, 0.25);
+  border-top-color: var(--accent);
+  animation: swap-spin 0.8s linear infinite;
+}
+.swap-progress-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--heading);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.swap-progress-detail {
+  font-size: 13px;
+  color: var(--body);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.swap-progress-track {
+  position: relative;
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.swap-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), #b9ebcf);
+  overflow: hidden;
+}
+/* moving sheen so the bar reads as "working" even between ticks */
+.swap-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  transform: translateX(-100%);
+  animation: swap-sheen 1.4s ease-in-out infinite;
+}
+.swap-progress.is-chain .swap-progress-fill {
+  animation: swap-fill var(--expected, 15s) cubic-bezier(0.25, 0.45, 0.45, 1) forwards;
+}
+.swap-progress.is-wallet .swap-progress-fill {
+  width: 35%;
+  animation: swap-indeterminate 1.3s ease-in-out infinite;
+}
+.swap-progress.is-done .swap-progress-fill {
+  width: 100%;
+  transition: width 0.3s ease-out;
+}
+.swap-progress.is-done .swap-progress-fill::after {
+  animation: none;
+}
+.swap-progress-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@keyframes swap-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes swap-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+/* fills to 92% over the expected time, then holds until the swap confirms */
+@keyframes swap-fill {
+  from {
+    width: 4%;
+  }
+  to {
+    width: 92%;
+  }
+}
+@keyframes swap-indeterminate {
+  from {
+    left: -35%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swap-spinner,
+  .swap-progress-fill::after,
+  .swap-progress.is-wallet .swap-progress-fill {
+    animation: none;
+  }
+}

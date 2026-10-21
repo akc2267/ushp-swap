@@ -37,14 +37,16 @@ import { formatUsd, useUsdPrices } from '../hooks/useUsdPrices'
 import {
   applySlippage,
   buildV4SwapCalldata,
-  getQuote,
+  getBestQuote,
   permit2TypedData,
   type PermitSingle,
+  type Quote,
   type SignedPermit,
 } from '../uniswap'
 import { AssetSelector } from './AssetSelector'
 import { ArrowDown, Chevron, TokenIcon } from './icons'
 import { NetworkSelect } from './NetworkSelect'
+import { SwapProgress, type SwapPhase, type SwapProgressState } from './SwapProgress'
 
 const SLIPPAGE_BPS = 50 // 0.5%
 const USD_PRESETS = [20, 100, 500]
@@ -135,14 +137,15 @@ export function SwapWidget() {
   const { data: capabilities } = useCapabilities({ query: { enabled: isConnected, retry: false } })
   const { sendTransaction: privySendTransaction } = usePrivySendTransaction()
 
-  // The widget trades native ETH against one selected token. `side` decides
-  // which one is spent: buy = ETH -> token, sell = token -> ETH.
+  // The widget trades the chain's base token (USDC) against one selected token
+  // (LINK). `side` decides which is spent: buy = USDC -> LINK (the default),
+  // sell = LINK -> USDC. ETH is never bought or sold, only used as a routing hop.
   const [token, setToken] = useState<TokenInfo>(chainCfg.tokens[0])
   const [side, setSide] = useState<Side>('buy')
 
   const [amount, setAmount] = useState('')
   const [activePreset, setActivePreset] = useState<number | null>(null)
-  const [quoteOut, setQuoteOut] = useState<bigint | null>(null)
+  const [quote, setQuote] = useState<Quote | null>(null)
   const [quoting, setQuoting] = useState(false)
   const [quoteError, setQuoteError] = useState<string | null>(null)
 
@@ -150,13 +153,14 @@ export function SwapWidget() {
   const [status, setStatus] = useState<string | null>(null)
   const [txLink, setTxLink] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState<SwapProgressState | null>(null)
+  const step = (phase: SwapPhase, label: string) => setProgress({ phase, label, startedAt: Date.now() })
   const [selectorOpen, setSelectorOpen] = useState(false)
 
   const onSelectedChain = walletChainId === chainId
-  const spendToken = side === 'buy' ? ETH : token
-  const receiveToken = side === 'buy' ? token : ETH
-  // PoolKey currency0 is native ETH, so ETH -> token is zeroForOne === true.
-  const zeroForOne = side === 'buy'
+  const spendToken = side === 'buy' ? chainCfg.base : token
+  const receiveToken = side === 'buy' ? token : chainCfg.base
+  const quoteOut = quote?.amountOut ?? null
 
   // Privy embedded wallets send through Privy so background steps can skip its
   // confirmation modal; external wallets like MetaMask go through wagmi.
@@ -169,7 +173,7 @@ export function SwapWidget() {
           a.type === 'wallet' && a.walletClientType === 'privy' && a.address.toLowerCase() === address?.toLowerCase(),
       )?.id
     : undefined
-  const gasToken = chainCfg.tokens.find((t) => t.symbol === 'USDC')
+  const gasToken = chainCfg.base.symbol === 'USDC' ? chainCfg.base : undefined
   // Embedded wallets on these chains swap in one step with gas paid in USDC
   // (approvals + swap batched), as long as they hold some USDC.
   const usdcGasEligible =
@@ -202,18 +206,18 @@ export function SwapWidget() {
   useEffect(() => {
     setQuoteError(null)
     if (!publicClient || amountIn === null) {
-      setQuoteOut(null)
+      setQuote(null)
       return
     }
     const seq = ++quoteSeq.current
     setQuoting(true)
     const t = setTimeout(async () => {
       try {
-        const out = await getQuote(publicClient, chainCfg.v4Quoter, token, amountIn, zeroForOne)
-        if (seq === quoteSeq.current) setQuoteOut(out)
+        const best = await getBestQuote(publicClient, chainCfg.v4Quoter, chainCfg.pools, spendToken, receiveToken, amountIn)
+        if (seq === quoteSeq.current) setQuote(best)
       } catch (err) {
         if (seq === quoteSeq.current) {
-          setQuoteOut(null)
+          setQuote(null)
           setQuoteError('No quote available for this amount.')
           console.error('quote error', err)
         }
@@ -222,7 +226,7 @@ export function SwapWidget() {
       }
     }, 350)
     return () => clearTimeout(t)
-  }, [publicClient, chainCfg.v4Quoter, token, amountIn, zeroForOne])
+  }, [publicClient, chainCfg.v4Quoter, chainCfg.pools, spendToken, receiveToken, amountIn])
 
   // --- fetch spend-token balance ----------------------------------------
   const loadBalance = useCallback(async () => {
@@ -256,7 +260,7 @@ export function SwapWidget() {
   function resetAmount() {
     setAmount('')
     setActivePreset(null)
-    setQuoteOut(null)
+    setQuote(null)
   }
 
   function flip() {
@@ -313,9 +317,10 @@ export function SwapWidget() {
   // send through wagmi. Waits for the receipt; throws if it reverted.
   async function sendAndWait(
     call: Call,
-    ui: { description: string; buttonText: string; silent?: boolean },
+    ui: { label: string; description: string; buttonText: string; silent?: boolean },
   ): Promise<Hex> {
     if (!publicClient) throw new Error('No RPC client')
+    step(ui.silent ? 'chain' : 'wallet', ui.label)
     let hash: Hex
     if (isEmbeddedWallet && address) {
       ;({ hash } = await privySendTransaction(
@@ -331,6 +336,7 @@ export function SwapWidget() {
       hash = await sendTransactionAsync({ chainId, to: call.to, data: call.data, value: call.value })
     }
     setTxLink(`${chainCfg.explorer}/tx/${hash}`)
+    step('chain', ui.label)
     const receipt = await publicClient.waitForTransactionReceipt({ hash, timeout: 180_000 })
     if (receipt.status !== 'success') throw new Error('Transaction reverted on-chain')
     return hash
@@ -357,9 +363,12 @@ export function SwapWidget() {
     throw new Error('Swap not confirmed after 3 minutes — check the wallet on Etherscan before retrying.')
   }
 
+  // Executes exactly the route that produced the displayed quote.
   function swapCall(permit?: SignedPermit): Call {
-    const { commands, inputs, value } = buildV4SwapCalldata(token, {
-      zeroForOne,
+    const { commands, inputs, value } = buildV4SwapCalldata({
+      tokenIn: spendToken,
+      tokenOut: receiveToken,
+      path: quote!.path,
       amountIn: amountIn!,
       amountOutMinimum: minOut!,
       permit,
@@ -373,9 +382,9 @@ export function SwapWidget() {
   }
 
   // --- swap --------------------------------------------------------------
-  // Buying (ETH -> token) is always one transaction. Selling a token needs two
-  // allowances the first time: token -> Permit2 (ERC20 approve) and
-  // Permit2 -> router (30 days). Once they exist, every sell is one transaction.
+  // Every swap spends an ERC20 (USDC or LINK), which needs two allowances the
+  // first time: token -> Permit2 (ERC20 approve) and Permit2 -> router
+  // (30 days). Once they exist, every swap is one transaction.
   // How the first-time setup happens depends on the wallet:
   //   - smart accounts (canBatch): approvals + swap batched — one confirmation
   //   - Privy embedded wallets: approvals sent silently, then the swap — one
@@ -388,7 +397,9 @@ export function SwapWidget() {
     setTxLink(null)
     setStatus(null)
     const symbol = spendToken.symbol
+    const swapLabel = `Swapping ${amount} ${symbol} → ${receiveToken.symbol}`
     const swapUi = {
+      label: swapLabel,
       description: `Swap ${amount} ${symbol} for at least ${minDisplay} ${receiveToken.symbol}.`,
       buttonText: 'Swap',
     }
@@ -450,9 +461,9 @@ export function SwapWidget() {
         const receivingGasToken = receiveToken.address === gasToken!.address
         const watchToken = receivingGasToken ? spendToken : receiveToken
         const before = await readBalance(watchToken)
-        setStatus('Swapping — gas paid in USDC…')
+        // Signing is silent here, so the on-chain countdown starts right away.
+        step('chain', swapLabel)
         await sendCallsPayingGasToken({ walletId: embeddedWalletId!, chainId, calls, asset: 'usdc' })
-        setStatus('Swap submitted — waiting for confirmation…')
         await waitForSwapSettled({
           token: watchToken,
           before,
@@ -460,8 +471,7 @@ export function SwapWidget() {
         })
         setTxLink(`${chainCfg.explorer}/address/${address}`)
       } else if (!needsErc20Approval && !needsPermit2Allowance) {
-        // Steady state (and every buy): a single transaction.
-        setStatus('Confirm the swap…')
+        // Steady state: a single transaction.
         await sendAndWait(swapCall(), swapUi)
       } else if (canBatch) {
         const calls = [
@@ -469,10 +479,10 @@ export function SwapWidget() {
           ...(needsPermit2Allowance ? [permit2ApproveCall] : []),
           swapCall(),
         ]
-        setStatus('Confirm the swap (includes one-time approval)…')
+        step('wallet', `${swapLabel} (includes one-time approval)`)
         const res = (await sendCallsAsync({ chainId, calls })) as { id?: string } | string
         const id = typeof res === 'string' ? res : res?.id
-        setStatus('Swap submitted — waiting for confirmation…')
+        step('chain', swapLabel)
         if (id && walletClient?.waitForCallsStatus) {
           const result = await walletClient.waitForCallsStatus({ id, timeout: 180_000 })
           const last = result.receipts?.[result.receipts.length - 1]
@@ -480,22 +490,24 @@ export function SwapWidget() {
           if (result.status !== 'success') throw new Error('Transaction reverted on-chain')
         }
       } else if (isEmbeddedWallet) {
-        setStatus(`Enabling ${symbol} for trading…`)
-        const setupUi = { description: `One-time setup so ${symbol} can be traded.`, buttonText: 'Continue', silent: true }
+        const setupUi = {
+          label: `Enabling ${symbol} for trading (one-time)`,
+          description: `One-time setup so ${symbol} can be traded.`,
+          buttonText: 'Continue',
+          silent: true,
+        }
         if (needsErc20Approval) await sendAndWait(erc20ApproveCall, setupUi)
         if (needsPermit2Allowance) await sendAndWait(permit2ApproveCall, setupUi)
         setTxLink(null)
-        setStatus('Confirm the swap…')
         await sendAndWait(swapCall(), swapUi)
       } else {
         if (needsErc20Approval) {
-          setStatus(`One-time approval to enable ${symbol} trading…`)
-          await sendAndWait(erc20ApproveCall, { description: '', buttonText: '' })
+          await sendAndWait(erc20ApproveCall, { label: `Approving ${symbol} (one-time)`, description: '', buttonText: '' })
           setTxLink(null)
         }
         let permit: SignedPermit | undefined
         if (needsPermit2Allowance) {
-          setStatus(`Sign to let Uniswap trade your ${symbol} for 30 days (no gas)…`)
+          step('wallet', `Sign to let Uniswap trade your ${symbol} for 30 days (no gas)`)
           const message: PermitSingle = {
             details: { token: spendToken.address, amount: MAX_UINT160, expiration: now + ALLOWANCE_TTL_SECONDS, nonce: permitNonce },
             spender: chainCfg.universalRouter,
@@ -503,14 +515,16 @@ export function SwapWidget() {
           }
           permit = { permit: message, signature: await signTypedDataAsync(permit2TypedData(chainId, message)) }
         }
-        setStatus('Confirm the swap…')
         await sendAndWait(swapCall(permit), swapUi)
       }
 
+      step('done', `Swapped ${amount} ${symbol} → ${receiveToken.symbol}`)
+      setTimeout(() => setProgress(null), 2500)
       setStatus('Swap confirmed ✓')
       resetAmount()
       loadBalance()
     } catch (err: unknown) {
+      setProgress(null)
       setStatus(isUserRejection(err) ? 'Request cancelled.' : `Error: ${errMessage(err).slice(0, 160)}`)
     } finally {
       setBusy(false)
@@ -522,6 +536,7 @@ export function SwapWidget() {
     if (!privyReady) {
       return <button className="cta" disabled>Loading…</button>
     }
+    if (progress) return <SwapProgress {...progress} />
     if (!authenticated) {
       return (
         <button className="cta" onClick={() => login()}>
@@ -556,7 +571,7 @@ export function SwapWidget() {
     }
     return (
       <button className="cta" disabled={busy} onClick={handleSwap}>
-        {busy ? (status ?? 'Working…') : `Swap ${spendToken.symbol} → ${receiveToken.symbol}`}
+        {busy ? 'Working…' : `Swap ${spendToken.symbol} → ${receiveToken.symbol}`}
       </button>
     )
   }
@@ -570,9 +585,10 @@ export function SwapWidget() {
   const spendUsd =
     spendPrice && amount && Number(amount) > 0 ? Number(amount) * spendPrice : null
 
-  // The non-ETH side always opens the asset selector; the ETH side is fixed.
+  // The base token (USDC) is fixed; the other side opens the asset selector
+  // when there's more than one token to choose from.
   function tokenChip(t: TokenInfo) {
-    if (t.isNative) {
+    if (t.address === chainCfg.base.address || chainCfg.tokens.length < 2) {
       return (
         <div className="token-chip token-chip--static">
           <TokenIcon symbol={t.symbol} size={28} />
@@ -711,6 +727,7 @@ export function SwapWidget() {
 
       {selectorOpen && (
         <AssetSelector
+          base={chainCfg.base}
           tokens={chainCfg.tokens}
           selected={token}
           onSelect={chooseToken}

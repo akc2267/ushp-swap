@@ -4,13 +4,12 @@ import { useQuery } from '@tanstack/react-query'
 import { formatUnits, parseUnits } from 'viem'
 import { usePublicClient } from 'wagmi'
 import { mainnet } from 'wagmi/chains'
-import { CHAIN_CONFIG, ETH, MAINNET_TOKENS } from '../constants'
-import { getQuote } from '../uniswap'
+import { CHAIN_CONFIG } from '../constants'
+import { getBestQuote } from '../uniswap'
 
 /**
- * Live USD prices by symbol, derived purely from mainnet v4 quotes:
- * tokenPerEth = quote(1 ETH -> token); ethUsd = USDC-per-ETH; so a token's USD
- * price is ethUsd / tokenPerEth.
+ * Live USD prices by symbol, from mainnet v4 quotes against USDC (taken as
+ * $1): a token's price is $100 divided by how much of it 100 USDC buys.
  *
  * Always priced on mainnet, even when trading on Sepolia — testnet pool prices
  * are arbitrary, so a "$100" preset should mean $100 at real market prices.
@@ -23,26 +22,20 @@ export function useUsdPrices() {
     staleTime: 60_000,
     refetchInterval: 60_000,
     queryFn: async () => {
-      const oneEth = parseUnits('1', 18)
-      const quoter = CHAIN_CONFIG[mainnet.id].v4Quoter
-      const entries = await Promise.all(
-        MAINNET_TOKENS.map(async (t) => {
+      const { base, tokens, pools, v4Quoter } = CHAIN_CONFIG[mainnet.id]
+      const usdIn = parseUnits('100', base.decimals)
+      const prices: Record<string, number> = { [base.symbol]: 1 }
+      await Promise.all(
+        tokens.map(async (t) => {
           try {
-            const out = await getQuote(publicClient!, quoter, t, oneEth, true)
-            return [t.symbol, Number(formatUnits(out, t.decimals))] as const
+            const { amountOut } = await getBestQuote(publicClient!, v4Quoter, pools, base, t, usdIn)
+            const units = Number(formatUnits(amountOut, t.decimals))
+            if (units > 0) prices[t.symbol] = 100 / units
           } catch {
-            return [t.symbol, NaN] as const
+            // leave unpriced
           }
         }),
       )
-      const ethUsd = Object.fromEntries(entries)['USDC']
-      const prices: Record<string, number> = {}
-      if (ethUsd && Number.isFinite(ethUsd)) {
-        prices[ETH.symbol] = ethUsd
-        for (const [sym, perEth] of entries) {
-          if (Number.isFinite(perEth) && perEth > 0) prices[sym] = ethUsd / perEth
-        }
-      }
       return prices
     },
   })

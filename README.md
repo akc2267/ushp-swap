@@ -1,7 +1,8 @@
 # USHP Swap
 
-Next.js (App Router) swap UI for Uniswap v4 on **Ethereum mainnet (real funds)** and
-**Sepolia testnet**, with [Privy](https://privy.io) for login and wallets. Styling follows
+Next.js (App Router) **USDC ↔ LINK** swap UI on Uniswap v4, on **Ethereum mainnet (real
+funds)** and **Sepolia testnet**, with [Privy](https://privy.io) for login and wallets. Users
+only ever hold ERC-20s; ETH appears only as an internal routing hop. Styling follows
 [ushpindex.com](https://www.ushpindex.com).
 
 ## Run
@@ -27,8 +28,13 @@ npm run build && npm start   # production
 - `src/app/providers.tsx` — `PrivyProvider` → `QueryClientProvider` → `@privy-io/wagmi`'s `WagmiProvider`.
   Email/social users get a Privy embedded wallet on login; wallet users keep their own.
   Login methods come from the Privy dashboard.
-- `src/constants.ts` — per-chain Uniswap v4 addresses and token lists (`CHAIN_CONFIG`).
-  Every token trades against native ETH in a hookless v4 pool.
+- `src/constants.ts` — per-chain Uniswap v4 addresses, the base token (USDC), the tradeable
+  tokens (LINK) and a small graph of known hookless pools (`CHAIN_CONFIG`).
+- `src/uniswap.ts` — routing: every path of up to two pools between the two tokens is quoted
+  with the V4Quoter (`quoteExactInput`) and the best one is executed as a `SWAP_EXACT_IN`, so
+  direct and via-ETH routes share one code path.
+- `src/components/SwapProgress.tsx` — the in-flight panel shown instead of the Swap button:
+  wallet prompt → ~15s on-chain countdown → done.
 - `src/components/SwapWidget.tsx` — network picker (follows the wallet if the user switches
   there), $20 / $100 / $500 presets, quotes via the V4Quoter, swaps via the Universal Router.
   Buys are one transaction. Sells need two allowances the first time (token → Permit2,
@@ -54,7 +60,9 @@ npm run build && npm start   # production
 - `src/hooks/useUsdPrices.ts` — USD prices for presets and the asset list, always from mainnet
   pools (Sepolia pool prices are arbitrary), matched to Sepolia tokens by symbol.
 - `scripts/` — standalone viem scripts: `probe-pools.mjs` / `probe-sepolia.mjs` discover liquid
-  ETH pools; `test-swap-call.mjs` / `test-sepolia-swap.mjs` simulate swap calldata.
+  ETH pools; `probe-pair-pools.mjs` ranks every hookless pool for a given token (e.g. USDC)
+  against chosen counter-tokens; `test-swap-call.mjs` / `test-sepolia-swap.mjs` simulate swap
+  calldata.
 
 ## Patches
 
