@@ -20,6 +20,7 @@ npm run build && npm start   # production
 | `PRIVY_JWKS_URL` | Optional; defaults to the app's Privy JWKS endpoint |
 | `NEXT_PUBLIC_RPC_URL` | Optional mainnet RPC for quotes/balances and the embedded wallet |
 | `NEXT_PUBLIC_SEPOLIA_RPC_URL` | Optional Sepolia RPC, same purpose |
+| `NEXT_PUBLIC_USDC_GAS_CHAIN_IDS` | Chains where Privy embedded wallets pay gas in USDC (default `11155111`) |
 
 ## How it fits together
 
@@ -37,6 +38,14 @@ npm run build && npm start   # production
   swap applies (`PERMIT2_PERMIT` + `V4_SWAP`). Not-yet-upgraded MetaMask accounts are not
   batched: MetaMask's upgrade transaction omits the 7702 authorization's 25k gas from its
   limit, so approve+swap batches that also upgrade the account run out of gas.
+- USDC gas (`src/hooks/usePrivyGasTokenCalls.ts`): on `NEXT_PUBLIC_USDC_GAS_CHAIN_IDS`, Privy
+  embedded wallets that hold USDC send approvals + swap as one `wallet_sendCalls` batch with
+  `sponsor: true, sponsor_options: { asset: 'usdc' }` (Privy "user pays" gas — enable USDC for the
+  chain under Fee sponsorship → Custom gas payment tokens, with "Sponsor gas fees" off). The React
+  SDK doesn't expose `sponsor_options`, so the hook signs the request with the user's authorization
+  key (`useAuthorizationSignature`) and sends it with the user's session
+  (`usePrivyClient_experimental`) — the same call the SDK makes internally; no app secret needed.
+  Privy returns a transaction id, not a hash, so the swap is confirmed by watching balances.
 - `src/app/api/me/route.ts` — example authenticated route: verifies the Privy access token
   (`Authorization: Bearer <getAccessToken()>` or the `privy-token` cookie) against the JWKS,
   then loads the user from Privy's REST API with the app secret.

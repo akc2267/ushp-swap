@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { encodeFunctionData, formatUnits, parseUnits, type Hex } from 'viem'
-import { usePrivy, useSendTransaction as usePrivySendTransaction, useWallets } from '@privy-io/react-auth'
+import {
+  usePrivy,
+  useSendTransaction as usePrivySendTransaction,
+  useWallets,
+  type WalletWithMetadata,
+} from '@privy-io/react-auth'
 import {
   useAccount,
   useCapabilities,
@@ -27,6 +32,7 @@ import {
   type SupportedChainId,
   type TokenInfo,
 } from '../constants'
+import { usePrivyGasTokenCalls } from '../hooks/usePrivyGasTokenCalls'
 import { formatUsd, useUsdPrices } from '../hooks/useUsdPrices'
 import {
   applySlippage,
@@ -46,6 +52,16 @@ const USD_PRESETS = [20, 100, 500]
 // first sell of a token, later sells are a single confirmation.
 const ALLOWANCE_TTL_SECONDS = 60 * 60 * 24 * 30
 const SIGNATURE_DEADLINE_SECONDS = 30 * 60
+
+// Chains where Privy embedded wallets pay gas in USDC (Privy "user pays" gas).
+// USDC must also be added for each chain under Fee sponsorship → Custom gas
+// payment tokens in the Privy dashboard.
+const USDC_GAS_CHAIN_IDS = (process.env.NEXT_PUBLIC_USDC_GAS_CHAIN_IDS ?? '11155111')
+  .split(',')
+  .map((id) => Number(id.trim()))
+  .filter(Boolean)
+const SETTLE_TIMEOUT_MS = 180_000
+const SETTLE_POLL_MS = 3_000
 type Side = 'buy' | 'sell'
 
 type Call = { to: `0x${string}`; data: `0x${string}`; value: bigint }
@@ -72,17 +88,20 @@ function atomicStatus(capabilities: unknown, chainId: number): 'supported' | 're
   return null
 }
 
+// Only treat explicit user cancellations as such — anything broader (e.g. any
+// message containing "cancel") hides real failures like insufficient gas.
 function isUserRejection(err: unknown): boolean {
   const e = err as any
   if (!e) return false
   if (e.code === 4001 || e.cause?.code === 4001) return true
   const s = `${e.name ?? ''} ${e.shortMessage ?? ''} ${e.message ?? ''}`.toLowerCase()
   return (
-    s.includes('rejected') ||
-    s.includes('denied') ||
-    s.includes('userrejected') ||
-    s.includes('exited') ||
-    s.includes('cancel')
+    s.includes('userrejectedrequest') ||
+    s.includes('user rejected') ||
+    s.includes('rejected by the user') ||
+    s.includes('user denied') ||
+    s.includes('user exited') ||
+    s.includes('user closed')
   )
 }
 
@@ -105,7 +124,8 @@ export function SwapWidget() {
   const publicClient = usePublicClient({ chainId })
   // Privy owns login and wallet connection; wagmi sees whichever wallet Privy
   // has set active (the embedded wallet, or an external one like MetaMask).
-  const { ready: privyReady, authenticated, login, connectWallet } = usePrivy()
+  const { ready: privyReady, authenticated, user, login, connectWallet } = usePrivy()
+  const sendCallsPayingGasToken = usePrivyGasTokenCalls()
   const { wallets } = useWallets()
   const { switchChain } = useSwitchChain()
   const { sendTransactionAsync } = useSendTransaction()
@@ -142,6 +162,18 @@ export function SwapWidget() {
   // confirmation modal; external wallets like MetaMask go through wagmi.
   const activeWallet = wallets.find((w) => address && w.address.toLowerCase() === address.toLowerCase())
   const isEmbeddedWallet = activeWallet?.walletClientType === 'privy'
+  // Privy's server-side wallet id, needed for its wallet API (USDC gas).
+  const embeddedWalletId = isEmbeddedWallet
+    ? user?.linkedAccounts.find(
+        (a): a is WalletWithMetadata =>
+          a.type === 'wallet' && a.walletClientType === 'privy' && a.address.toLowerCase() === address?.toLowerCase(),
+      )?.id
+    : undefined
+  const gasToken = chainCfg.tokens.find((t) => t.symbol === 'USDC')
+  // Embedded wallets on these chains swap in one step with gas paid in USDC
+  // (approvals + swap batched), as long as they hold some USDC.
+  const usdcGasEligible =
+    isEmbeddedWallet && onSelectedChain && !!embeddedWalletId && !!gasToken && USDC_GAS_CHAIN_IDS.includes(chainId)
   // One-click (approve + swap in one confirmation) only for accounts that are
   // already smart accounts. We skip 'ready' (not yet upgraded): MetaMask's
   // upgrade transaction doesn't budget for the 7702 authorization's 25k gas,
@@ -304,6 +336,27 @@ export function SwapWidget() {
     return hash
   }
 
+  async function readBalance(t: TokenInfo): Promise<bigint> {
+    if (!publicClient || !address) return 0n
+    return t.isNative
+      ? publicClient.getBalance({ address })
+      : publicClient.readContract({ address: t.address, abi: ERC20_ABI, functionName: 'balanceOf', args: [address] })
+  }
+
+  // Privy's wallet API returns a transaction id rather than a hash, so confirm
+  // the swap on-chain. Watch the side of the trade that doesn't involve the gas
+  // token (a reverted batch still charges the USDC gas fee): the received token
+  // must rise by at least the minimum out, or — when receiving USDC — the ETH
+  // spent must leave the wallet.
+  async function waitForSwapSettled(watch: { token: TokenInfo; before: bigint; done: (now: bigint) => boolean }) {
+    const deadline = Date.now() + SETTLE_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
+      if (watch.done(await readBalance(watch.token))) return
+    }
+    throw new Error('Swap not confirmed after 3 minutes — check the wallet on Etherscan before retrying.')
+  }
+
   function swapCall(permit?: SignedPermit): Call {
     const { commands, inputs, value } = buildV4SwapCalldata(token, {
       zeroForOne,
@@ -375,7 +428,38 @@ export function SwapWidget() {
         value: 0n,
       }
 
-      if (!needsErc20Approval && !needsPermit2Allowance) {
+      // USDC gas needs enough USDC for the fee on top of any USDC being sold.
+      const usdcForGas = usdcGasEligible && gasToken ? await readBalance(gasToken) : 0n
+      const usdcSpent = gasToken && spendToken.address === gasToken.address ? amountIn : 0n
+      const useUsdcGas = usdcGasEligible && usdcForGas > usdcSpent
+      if (usdcGasEligible && !useUsdcGas && (await readBalance(ETH)) === 0n) {
+        throw new Error(
+          usdcSpent > 0n
+            ? 'Gas is paid in USDC — leave a little USDC unsold (try a slightly smaller amount).'
+            : 'This wallet needs some USDC (or ETH) to pay gas.',
+        )
+      }
+
+      if (useUsdcGas) {
+        // One step: approvals (if needed) + swap in a single batch, gas in USDC.
+        const calls = [
+          ...(needsErc20Approval ? [erc20ApproveCall] : []),
+          ...(needsPermit2Allowance ? [permit2ApproveCall] : []),
+          swapCall(),
+        ]
+        const receivingGasToken = receiveToken.address === gasToken!.address
+        const watchToken = receivingGasToken ? spendToken : receiveToken
+        const before = await readBalance(watchToken)
+        setStatus('Swapping — gas paid in USDC…')
+        await sendCallsPayingGasToken({ walletId: embeddedWalletId!, chainId, calls, asset: 'usdc' })
+        setStatus('Swap submitted — waiting for confirmation…')
+        await waitForSwapSettled({
+          token: watchToken,
+          before,
+          done: (now) => (receivingGasToken ? before - now >= amountIn : now - before >= minOut),
+        })
+        setTxLink(`${chainCfg.explorer}/address/${address}`)
+      } else if (!needsErc20Approval && !needsPermit2Allowance) {
         // Steady state (and every buy): a single transaction.
         setStatus('Confirm the swap…')
         await sendAndWait(swapCall(), swapUi)
@@ -594,9 +678,11 @@ export function SwapWidget() {
         </div>
       </div>
 
-      {canBatch && !spendToken.isNative && (
+      {usdcGasEligible ? (
+        <div className="oneclick-hint">⚡ Gas paid in USDC — no ETH needed</div>
+      ) : canBatch && !spendToken.isNative ? (
         <div className="oneclick-hint">⚡ One-click: any approval is bundled with the swap</div>
-      )}
+      ) : null}
 
       {primaryButton()}
 
